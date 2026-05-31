@@ -3,7 +3,12 @@
     "miniaudio",
     {
       "name": "whisper-cpp",
-      "features": ["metal"]
+      "features": ["metal"],
+      "platform": "osx"
+    },
+    {
+      "name": "whisper-cpp",
+      "platform": "!osx"
     }
   ]
 }

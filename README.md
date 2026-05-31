@@ -14,13 +14,22 @@ The free local WisprFlow alternative
 - Git
 - vcpkg
 
-```sh
-cmake --preset default
-```
+Build for your machine (default preset):
 
 ```sh
+cmake --preset default
 cmake --build build
 ```
+
+Platform-specific presets (same source, different `build/` dirs):
+
+```sh
+cmake --preset macos && cmake --build --preset macos
+cmake --preset windows && cmake --build --preset windows
+cmake --preset linux && cmake --build --preset linux
+```
+
+Project layout: `src/common/` (shared), `src/macos/`, `src/windows/`, `src/linux/` (platform adapters). Push-to-talk is implemented on **macOS** only for now.
 
 ```sh
 curl -L -o ggml-tiny.en.bin https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-tiny.en.bin
@@ -33,6 +42,16 @@ curl -L -o ggml-medium.en.bin https://huggingface.co/ggerganov/whisper.cpp/resol
 ```sh
 ./build/dictate
 ```
+
+On **macOS**, hold **Control+Shift+D** for a live preview; release for a polished transcription.
+
+1. **Accessibility** — System Settings → Privacy & Security → **Accessibility** → enable **Cursor** (or Terminal/iTerm), or add `build/dictate` via the `+` button.
+2. **Input Monitoring** (recommended) — same screen → **Input Monitoring** → enable the same app.
+3. Quit and restart `./build/dictate`. You should see: `Push-to-talk active: hold Control+Shift+D`.
+4. Debug keys: `DICTATE_DEBUG=1 ./build/dictate` logs key events to stderr.
+5. Override the letter key only: `DICTATE_PTT_KEYCODE=2` (default `D` is keycode 2).
+
+**Ctrl+C** in the terminal to quit. Windows and Linux builds compile but PTT is not implemented yet.
 
 ### Available Models
 
