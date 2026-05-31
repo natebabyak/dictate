@@ -1,3 +1,9 @@
 {
-  "dependencies": ["miniaudio", "whisper-cpp"]
+  "dependencies": [
+    "miniaudio",
+    {
+      "name": "whisper-cpp",
+      "features": ["metal"]
+    }
+  ]
 }
