@@ -1,271 +1,211 @@
 #include "platform/ptt.hpp"
 
-#include "common/state.hpp"
+#include "settings.hpp"
+#include "state.hpp"
 
 #import <ApplicationServices/ApplicationServices.h>
 #import <Carbon/Carbon.h>
 #import <Cocoa/Cocoa.h>
-#import <CoreFoundation/CoreFoundation.h>
 
-#include <cstdlib>
+#include <csignal>
+#include <cctype>
 #include <iostream>
+#include <sstream>
+#include <string>
+#include <vector>
 
-namespace dictate::platform {
+namespace dictate {
 
 namespace {
 
-constexpr CGKeyCode kPttKey = kVK_ANSI_D; // 0x02
+struct Hotkey {
+  CGKeyCode key = kVK_ANSI_D;
+  bool ctrl = true;
+  bool shift = true;
+  bool opt = false;
+  bool cmd = false;
+};
 
-bool g_debug = false;
-CFMachPortRef g_event_tap = nullptr;
+Hotkey g_hk;
 
-bool debug_enabled() {
-  const char *env = std::getenv("DICTATE_DEBUG");
-  return env != nullptr && env[0] != '\0' && env[0] != '0';
+static std::string lower(std::string s) {
+  for (char &c : s)
+    c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+  return s;
 }
 
-void load_ptt_config() { g_debug = debug_enabled(); }
-
-bool key_down(CGKeyCode key) {
-  return CGEventSourceKeyState(kCGEventSourceStateHIDSystemState, key) ||
-         CGEventSourceKeyState(kCGEventSourceStateCombinedSessionState, key);
+static CGKeyCode key_from_name(const std::string &name) {
+  if (name.size() == 1) {
+    const char c = lower(name)[0];
+    if (c >= 'a' && c <= 'z')
+      return static_cast<CGKeyCode>(kVK_ANSI_A + (c - 'a'));
+    if (c >= '0' && c <= '9')
+      return static_cast<CGKeyCode>(kVK_ANSI_0 + (c - '0'));
+  }
+  if (name == "space")
+    return kVK_Space;
+  if (name == "f5")
+    return kVK_F5;
+  return kVK_ANSI_D;
 }
 
-bool modifiers_chord_live() {
-  const bool ctrl = key_down(static_cast<CGKeyCode>(kVK_Control)) ||
-                    key_down(static_cast<CGKeyCode>(kVK_RightControl));
-  const bool shift = key_down(static_cast<CGKeyCode>(kVK_Shift)) ||
-                     key_down(static_cast<CGKeyCode>(kVK_RightShift));
-  return ctrl && shift;
+void parse_hotkey(const std::string &spec) {
+  g_hk = {};
+  std::stringstream ss(lower(spec));
+  std::string part;
+  std::string key_part = "d";
+  while (std::getline(ss, part, '+')) {
+    part.erase(0, part.find_first_not_of(" \t"));
+    part.erase(part.find_last_not_of(" \t") + 1);
+    if (part.empty())
+      continue;
+    if (part == "ctrl" || part == "control")
+      g_hk.ctrl = true;
+    else if (part == "shift")
+      g_hk.shift = true;
+    else if (part == "opt" || part == "option" || part == "alt")
+      g_hk.opt = true;
+    else if (part == "cmd" || part == "command")
+      g_hk.cmd = true;
+    else
+      key_part = part;
+  }
+  g_hk.key = key_from_name(key_part);
 }
 
-bool modifiers_chord_flags(NSEventModifierFlags flags) {
-  return (flags & NSEventModifierFlagControl) &&
-         (flags & NSEventModifierFlagShift);
+bool mod_down(CGKeyCode vk) {
+  return CGEventSourceKeyState(kCGEventSourceStateHIDSystemState, vk);
 }
 
-bool modifiers_chord_cg(CGEventFlags flags) {
-  return (flags & kCGEventFlagMaskControl) && (flags & kCGEventFlagMaskShift);
+bool chord_live() {
+  const bool ctrl = !g_hk.ctrl || mod_down(kVK_Control) || mod_down(kVK_RightControl);
+  const bool shift = !g_hk.shift || mod_down(kVK_Shift) || mod_down(kVK_RightShift);
+  const bool opt = !g_hk.opt || mod_down(kVK_Option) || mod_down(kVK_RightOption);
+  const bool cmd = !g_hk.cmd || mod_down(kVK_Command) || mod_down(kVK_RightCommand);
+  return ctrl && shift && opt && cmd;
 }
 
-const char *key_name() { return "Control+Shift+D"; }
+bool chord_flags(NSEventModifierFlags f) {
+  const bool ctrl = !g_hk.ctrl || (f & NSEventModifierFlagControl);
+  const bool shift = !g_hk.shift || (f & NSEventModifierFlagShift);
+  const bool opt = !g_hk.opt || (f & NSEventModifierFlagOption);
+  const bool cmd = !g_hk.cmd || (f & NSEventModifierFlagCommand);
+  return ctrl && shift && opt && cmd;
+}
 
-void log_key_event(const char *source, const char *kind, CGKeyCode keycode,
-                   NSEventModifierFlags flags) {
-  if (!g_debug && keycode != kPttKey)
+bool chord_ok(NSEventModifierFlags f) { return chord_flags(f) || chord_live(); }
+
+bool chord_cg(CGEventFlags f) {
+  const bool ctrl = !g_hk.ctrl || (f & kCGEventFlagMaskControl);
+  const bool shift = !g_hk.shift || (f & kCGEventFlagMaskShift);
+  const bool opt = !g_hk.opt || (f & kCGEventFlagMaskAlternate);
+  const bool cmd = !g_hk.cmd || (f & kCGEventFlagMaskCommand);
+  return (ctrl && shift && opt && cmd) || chord_live();
+}
+
+void on_hotkey(bool down) {
+  const bool toggle = g_settings.mode == Settings::Mode::Toggle;
+  if (toggle) {
+    if (!down)
+      return;
+    if (g_session.recording.load())
+      stop_recording();
+    else
+      start_recording();
     return;
-  std::cerr << "[ptt] " << source << " " << kind << " keycode=" << keycode
-            << " event-ctrl="
-            << ((flags & NSEventModifierFlagControl) ? "1" : "0")
-            << " event-shift="
-            << ((flags & NSEventModifierFlagShift) ? "1" : "0")
-            << " live-ctrl-shift="
-            << (modifiers_chord_live() ? "1" : "0") << '\n';
-}
-
-void on_chord_pressed() {
-  std::cerr << "[ptt] Control+Shift+D pressed — recording started\n";
-  begin_session();
-}
-
-void on_chord_released() {
-  std::cerr << "[ptt] Control+Shift+D released — finalizing\n";
-  end_session();
-}
-
-bool chord_triggered(NSEventModifierFlags flags) {
-  return modifiers_chord_flags(flags) || modifiers_chord_live();
-}
-
-void handle_flags_changed(NSEvent *event, const char *source) {
-  log_key_event(source, "flagsChanged", static_cast<CGKeyCode>(event.keyCode),
-                event.modifierFlags);
-
-  if (g_ptt.active.load() && !modifiers_chord_live())
-    on_chord_released();
-}
-
-void handle_key_down_up(NSEvent *event, const char *source) {
-  const CGKeyCode keycode = static_cast<CGKeyCode>(event.keyCode);
-
-  if (g_debug || keycode == kPttKey) {
-    log_key_event(source,
-                  event.type == NSEventTypeKeyDown ? "keyDown" : "keyUp",
-                  keycode, event.modifierFlags);
   }
+  if (down) {
+    if (!g_session.recording.load())
+      start_recording();
+  } else if (g_session.recording.load()) {
+    stop_recording();
+  }
+}
 
-  if (keycode != kPttKey)
+void handle_event(NSEvent *event) {
+  const CGKeyCode code = static_cast<CGKeyCode>(event.keyCode);
+  if (code != g_hk.key)
     return;
 
-  if (event.type == NSEventTypeKeyDown) {
-    if (chord_triggered(event.modifierFlags) && !g_ptt.active.load())
-      on_chord_pressed();
-  } else if (g_ptt.active.load()) {
-    on_chord_released();
-  }
+  if (event.type == NSEventTypeKeyDown)
+    on_hotkey(true);
+  else if (event.type == NSEventTypeKeyUp)
+    on_hotkey(false);
 }
 
-void handle_ns_event(NSEvent *event, const char *source) {
-  if (event.type == NSEventTypeFlagsChanged)
-    handle_flags_changed(event, source);
-  else if (event.type == NSEventTypeKeyDown ||
-           event.type == NSEventTypeKeyUp)
-    handle_key_down_up(event, source);
-}
-
-void request_permissions() {
-  const bool ax = AXIsProcessTrusted();
-  const bool listen = CGPreflightListenEventAccess();
-
-  std::cerr << "[ptt] Accessibility: " << (ax ? "granted" : "NOT granted")
-            << '\n';
-  std::cerr << "[ptt] Input Monitoring: " << (listen ? "granted" : "NOT granted")
-            << '\n';
-
-  if (!ax) {
-    std::cerr << "  → Enable Cursor/Terminal/dictate under Privacy > "
-                 "Accessibility, then restart.\n";
-    const void *keys[] = {kAXTrustedCheckOptionPrompt};
-    const void *values[] = {kCFBooleanTrue};
-    CFDictionaryRef opts = CFDictionaryCreate(
-        kCFAllocatorDefault, keys, values, 1, &kCFTypeDictionaryKeyCallBacks,
-        &kCFTypeDictionaryValueCallBacks);
-    AXIsProcessTrustedWithOptions(opts);
-    CFRelease(opts);
-  }
-
-  if (!listen) {
-    std::cerr << "  → Enable the same app under Privacy > Input Monitoring, "
-                 "then restart.\n";
-    CGRequestListenEventAccess();
-  }
-}
-
-CGEventRef cg_event_tap_callback(CGEventTapProxy, CGEventType type,
-                                 CGEventRef event, void *) {
+CGEventRef tap_cb(CGEventTapProxy, CGEventType type, CGEventRef event, void *) {
   if (type == kCGEventTapDisabledByTimeout ||
-      type == kCGEventTapDisabledByUserInput) {
-    if (g_event_tap != nullptr)
-      CGEventTapEnable(g_event_tap, true);
+      type == kCGEventTapDisabledByUserInput)
     return event;
-  }
 
-  const CGKeyCode keycode = static_cast<CGKeyCode>(
+  const CGKeyCode code = static_cast<CGKeyCode>(
       CGEventGetIntegerValueField(event, kCGKeyboardEventKeycode));
-  const CGEventFlags flags = CGEventGetFlags(event);
 
-  if (type == kCGEventFlagsChanged) {
-    if (g_ptt.active.load() && !modifiers_chord_live())
-      on_chord_released();
-    return event;
-  }
-
-  if (keycode != kPttKey)
+  if (code != g_hk.key)
     return event;
 
-  if (g_debug) {
-    std::cerr << "[ptt] tap " << (type == kCGEventKeyDown ? "keyDown" : "keyUp")
-              << " keycode=" << keycode << '\n';
-  }
-
-  if (type == kCGEventKeyDown) {
-    if ((modifiers_chord_cg(flags) || modifiers_chord_live()) &&
-        !g_ptt.active.load())
-      on_chord_pressed();
-  } else if (g_ptt.active.load()) {
-    on_chord_released();
-  }
+  if (type == kCGEventKeyDown && chord_cg(CGEventGetFlags(event)))
+    on_hotkey(true);
+  else if (type == kCGEventKeyUp)
+    on_hotkey(false);
 
   return event;
 }
 
-bool install_event_tap() {
-  const CGEventMask mask = CGEventMaskBit(kCGEventKeyDown) |
-                           CGEventMaskBit(kCGEventKeyUp) |
-                           CGEventMaskBit(kCGEventFlagsChanged);
-
-  const CGEventTapLocation locations[] = {kCGSessionEventTap, kCGHIDEventTap,
-                                          kCGAnnotatedSessionEventTap};
-
-  for (CGEventTapLocation loc : locations) {
-    g_event_tap = CGEventTapCreate(loc, kCGHeadInsertEventTap,
-                                   kCGEventTapOptionListenOnly, mask,
-                                   cg_event_tap_callback, nullptr);
-    if (g_event_tap != nullptr) {
-      std::cerr << "[ptt] CGEventTap installed.\n";
-      break;
-    }
-  }
-
-  if (g_event_tap == nullptr) {
-    std::cerr << "[ptt] CGEventTap failed to install.\n";
-    return false;
-  }
-
-  CFRunLoopSourceRef source =
-      CFMachPortCreateRunLoopSource(kCFAllocatorDefault, g_event_tap, 0);
-  if (source == nullptr) {
-    CFRelease(g_event_tap);
-    g_event_tap = nullptr;
-    return false;
-  }
-
-  CFRunLoopAddSource(CFRunLoopGetCurrent(), source, kCFRunLoopCommonModes);
-  CGEventTapEnable(g_event_tap, true);
-  CFRelease(source);
-  return true;
-}
-
 } // namespace
 
-const char *ptt_key_name() { return key_name(); }
+void init_signals() {
+  signal(SIGINT, [](int) { g_running = false; });
+  signal(SIGTERM, [](int) { g_running = false; });
+}
 
-void run_ptt_loop() {
+void run_ptt() {
   @autoreleasepool {
-    load_ptt_config();
-    request_permissions();
+    parse_hotkey(g_settings.hotkey);
+
+    if (!AXIsProcessTrusted())
+      std::cerr << "Grant Accessibility to this app, then restart.\n";
+    if (!CGPreflightListenEventAccess())
+      CGRequestListenEventAccess();
 
     [NSApplication sharedApplication];
 
-    const NSEventMask mask = NSEventMaskKeyDown | NSEventMaskKeyUp |
-                             NSEventMaskFlagsChanged;
+    const NSEventMask mask =
+        NSEventMaskKeyDown | NSEventMaskKeyUp | NSEventMaskFlagsChanged;
 
-    id global_monitor = [NSEvent addGlobalMonitorForEventsMatchingMask:mask
-                                                               handler:^(NSEvent *e) {
-                                                                 handle_ns_event(
-                                                                     e, "global");
-                                                               }];
+    [NSEvent addGlobalMonitorForEventsMatchingMask:mask
+                                           handler:^(NSEvent *e) {
+                                             handle_event(e);
+                                           }];
 
-    id local_monitor = [NSEvent addLocalMonitorForEventsMatchingMask:mask
-                                                             handler:^NSEvent *(
-                                                                 NSEvent *e) {
-                                                               handle_ns_event(
-                                                                   e, "local");
-                                                               return e;
-                                                             }];
+    [NSEvent addLocalMonitorForEventsMatchingMask:mask
+                                        handler:^NSEvent *(NSEvent *e) {
+                                          handle_event(e);
+                                          return e;
+                                        }];
 
-    std::cerr << "[ptt] Global monitor: "
-              << (global_monitor ? "ok" : "FAILED") << '\n';
-    std::cerr << "[ptt] Local monitor: "
-              << (local_monitor ? "ok" : "FAILED") << '\n';
+    const CGEventMask cmask = CGEventMaskBit(kCGEventKeyDown) |
+                              CGEventMaskBit(kCGEventKeyUp);
+    CFMachPortRef tap = CGEventTapCreate(
+        kCGSessionEventTap, kCGHeadInsertEventTap, kCGEventTapOptionListenOnly,
+        cmask, tap_cb, nullptr);
+    if (tap) {
+      CFRunLoopSourceRef src =
+          CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0);
+      CFRunLoopAddSource(CFRunLoopGetCurrent(), src, kCFRunLoopCommonModes);
+      CGEventTapEnable(tap, true);
+      CFRelease(src);
+    }
 
-    install_event_tap();
-
-    std::cerr << "[ptt] Hold " << key_name()
-              << " (D keycode=" << static_cast<unsigned>(kPttKey) << ").\n";
-    std::cerr << "[ptt] DICTATE_DEBUG=1 logs every key event.\n";
+    const char *mode =
+        g_settings.mode == Settings::Mode::Toggle ? "toggle" : "hold";
+    std::cerr << "Ready (" << mode << "): " << g_settings.hotkey << '\n';
 
     while (g_running) {
       [[NSRunLoop currentRunLoop]
           runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.05]];
     }
-
-    if (g_event_tap != nullptr) {
-      CGEventTapEnable(g_event_tap, false);
-      CFRelease(g_event_tap);
-      g_event_tap = nullptr;
-    }
   }
 }
 
-} // namespace dictate::platform
+} // namespace dictate

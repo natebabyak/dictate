@@ -1,8 +1,9 @@
 #pragma once
 
+#include <filesystem>
+
 namespace dictate {
 
-void run_ptt();
-void init_signals();
+std::filesystem::path exe_dir();
 
 } // namespace dictate

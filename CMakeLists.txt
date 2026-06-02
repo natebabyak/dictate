@@ -7,32 +7,25 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 find_package(whisper CONFIG REQUIRED)
 
-set(DICTATE_COMMON_SOURCES
-    src/common/state.cpp
-    src/common/audio.cpp
-    src/common/transcription.cpp
-    src/common/app.cpp
+set(SOURCES
+    src/main.cpp
+    src/paths.cpp
+    src/settings.cpp
+    src/replace.cpp
+    src/state.cpp
+    src/audio.cpp
+    src/transcribe.cpp
 )
 
 if(APPLE)
-  set(DICTATE_PLATFORM_SOURCES
-      src/macos/ptt.mm
-      src/macos/signals.cpp
-  )
+  list(APPEND SOURCES src/macos/ptt.mm)
 elseif(WIN32)
-  set(DICTATE_PLATFORM_SOURCES
-      src/windows/ptt.cpp
-      src/windows/signals.cpp
-  )
+  list(APPEND SOURCES src/windows/ptt.cpp)
 else()
-  set(DICTATE_PLATFORM_SOURCES
-      src/linux/ptt.cpp
-      src/linux/signals.cpp
-  )
+  list(APPEND SOURCES src/linux/ptt.cpp)
 endif()
 
-add_executable(dictate src/main.cpp ${DICTATE_COMMON_SOURCES}
-                           ${DICTATE_PLATFORM_SOURCES})
+add_executable(dictate ${SOURCES})
 
 target_include_directories(dictate PRIVATE src)
 
@@ -42,5 +35,5 @@ if(APPLE)
   target_link_libraries(dictate PRIVATE
       "-framework ApplicationServices"
       "-framework Cocoa"
-      "-framework CoreFoundation")
+      "-framework Carbon")
 endif()
