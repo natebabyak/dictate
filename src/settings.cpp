@@ -1,78 +1,116 @@
 #include "settings.hpp"
 
 #include "paths.hpp"
+#include "schema.hpp"
 
-#include <algorithm>
-#include <cctype>
 #include <fstream>
 #include <iostream>
-#include <sstream>
+#include <nlohmann/json.hpp>
+#include <valijson/adapters/nlohmann_json_adapter.hpp>
+#include <valijson/schema.hpp>
+#include <valijson/schema_parser.hpp>
+#include <valijson/validator.hpp>
 
 namespace dictate {
 
 Settings g_settings;
 
-std::filesystem::path config_path() { return exe_dir() / "dictate.conf"; }
+std::filesystem::path config_path() { return exe_dir() / "config.json"; }
 
-std::filesystem::path replacements_path() {
-  return exe_dir() / "replacements.txt";
-}
-
-static std::string trim(std::string s) {
-  while (!s.empty() && std::isspace(static_cast<unsigned char>(s.front())))
-    s.erase(s.begin());
-  while (!s.empty() && std::isspace(static_cast<unsigned char>(s.back())))
-    s.pop_back();
-  return s;
-}
-
-static std::string lower(std::string s) {
-  for (char &c : s)
-    c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-  return s;
-}
-
-Settings load_settings() {
-  Settings s;
-  std::ifstream in(config_path());
-  if (!in)
-    return s;
-
-  std::string line;
-  while (std::getline(in, line)) {
-    line = trim(line);
-    if (line.empty() || line[0] == '#')
-      continue;
-    const auto eq = line.find('=');
-    if (eq == std::string::npos)
-      continue;
-    const std::string key = lower(trim(line.substr(0, eq)));
-    const std::string val = trim(line.substr(eq + 1));
-    if (key == "mode") {
-      if (lower(val) == "toggle")
-        s.mode = Settings::Mode::Toggle;
-      else
-        s.mode = Settings::Mode::Hold;
-    } else if (key == "hotkey") {
-      s.hotkey = val;
-    } else if (key == "model") {
-      s.model = val;
-    }
+const char *model_filename(const Settings::Model model) {
+  switch (model) {
+  case Settings::Model::TinyEn:
+    return "ggml-tiny.en.bin";
+  case Settings::Model::BaseEn:
+    return "ggml-base.en.bin";
+  case Settings::Model::SmallEn:
+    return "ggml-small.en.bin";
+  case Settings::Model::MediumEn:
+    return "ggml-medium.en.bin";
+  case Settings::Model::LargeV3:
+    return "ggml-large-v3.bin";
   }
-  return s;
+  return "ggml-tiny.en.bin";
 }
 
-bool save_settings(const Settings &s) {
-  std::ofstream out(config_path());
-  if (!out) {
-    std::cerr << "Cannot write " << config_path() << '\n';
+namespace {
+
+bool validate_config(const nlohmann::json &doc, std::string &error) {
+  const nlohmann::json schema = nlohmann::json::parse(kConfigSchema);
+
+  valijson::Schema schema_obj;
+  valijson::SchemaParser parser;
+  valijson::adapters::NlohmannJsonAdapter schema_adapter(schema);
+  try {
+    parser.populateSchema(schema_adapter, schema_obj);
+  } catch (const std::exception &e) {
+    error = e.what();
     return false;
   }
-  out << "mode=" << (s.mode == Settings::Mode::Toggle ? "toggle" : "hold")
-      << '\n';
-  out << "hotkey=" << s.hotkey << '\n';
-  out << "model=" << s.model << '\n';
-  return true;
+
+  valijson::Validator validator;
+  valijson::adapters::NlohmannJsonAdapter doc_adapter(doc);
+  valijson::ValidationResults results;
+  if (validator.validate(schema_obj, doc_adapter, &results))
+    return true;
+
+  valijson::ValidationResults::Error err;
+  unsigned n = 0;
+  while (results.popError(err)) {
+    if (n++)
+      error += "; ";
+    error += err.description;
+  }
+  return false;
+}
+
+std::optional<Settings::Model> parse_model(const std::string &name) {
+  if (name == "tiny.en")
+    return Settings::Model::TinyEn;
+  if (name == "base.en")
+    return Settings::Model::BaseEn;
+  if (name == "small.en")
+    return Settings::Model::SmallEn;
+  if (name == "medium.en")
+    return Settings::Model::MediumEn;
+  if (name == "large-v3")
+    return Settings::Model::LargeV3;
+  return std::nullopt;
+}
+
+Settings settings_from_json(const nlohmann::json &j) {
+  Settings s;
+  s.mode = j["mode"] == "toggle" ? Settings::Mode::Toggle : Settings::Mode::Hold;
+  s.hotkey = j["hotkey"].get<std::string>();
+  s.model = *parse_model(j["model"].get<std::string>());
+  return s;
+}
+
+} // namespace
+
+std::optional<Settings> load_settings() {
+  std::ifstream in(config_path());
+  if (!in) {
+    std::cerr << "Missing " << config_path() << '\n';
+    return std::nullopt;
+  }
+
+  nlohmann::json j;
+  try {
+    in >> j;
+  } catch (const nlohmann::json::exception &e) {
+    std::cerr << "Invalid JSON in " << config_path() << ": " << e.what()
+              << '\n';
+    return std::nullopt;
+  }
+
+  std::string error;
+  if (!validate_config(j, error)) {
+    std::cerr << "Config validation failed: " << error << '\n';
+    return std::nullopt;
+  }
+
+  return settings_from_json(j);
 }
 
 } // namespace dictate

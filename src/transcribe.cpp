@@ -1,12 +1,8 @@
 #include <whisper.h>
 
-#include "replace.hpp"
-#include "settings.hpp"
+#include "platform/inject.hpp"
 #include "state.hpp"
 
-#include <algorithm>
-#include <chrono>
-#include <iostream>
 #include <string>
 #include <thread>
 #include <vector>
@@ -21,8 +17,7 @@ static std::string whisper_text(whisper_context *ctx, const float *pcm,
   p.print_special = false;
   p.language = "en";
   p.no_timestamps = true;
-  p.n_threads =
-      std::min(8, static_cast<int>(std::thread::hardware_concurrency()));
+  p.n_threads = static_cast<int>(std::thread::hardware_concurrency());
   p.abort_callback = should_abort;
   p.abort_callback_user_data = nullptr;
 
@@ -38,33 +33,27 @@ static std::string whisper_text(whisper_context *ctx, const float *pcm,
   return text;
 }
 
-void process_loop(whisper_context *ctx,
-                  const std::vector<Replacement> &replacements) {
+void process_loop(whisper_context *ctx) {
   while (g_running) {
-    if (!g_session.ready.exchange(false)) {
-      std::this_thread::sleep_for(std::chrono::milliseconds(50));
-      continue;
-    }
-
     std::vector<float> pcm;
     {
-      std::lock_guard lock(g_session.mutex);
+      std::unique_lock lock(g_session.mutex);
+      g_session.cv.wait(lock, [] {
+        return g_session.ready || !g_running.load();
+      });
+      if (!g_running)
+        break;
+      g_session.ready = false;
       pcm.swap(g_session.pcm);
     }
 
-    if (pcm.size() < 1600) {
-      std::cout << "(too short)\n";
+    if (pcm.size() < 1600)
       continue;
-    }
 
-    std::string text = whisper_text(ctx, pcm.data(), static_cast<int>(pcm.size()));
-    text = apply_replacements(text, replacements);
-
-    if (text.empty())
-      std::cout << "(no speech)\n";
-    else
-      std::cout << text << '\n';
-    std::cout.flush();
+    const std::string text =
+        whisper_text(ctx, pcm.data(), static_cast<int>(pcm.size()));
+    if (!text.empty())
+      inject_text(text);
   }
 }
 

@@ -1,0 +1,6 @@
+{
+  "$schema": "./schema.json",
+  "mode": "hold",
+  "hotkey": "control+shift+d",
+  "model": "tiny.en"
+}

@@ -12,7 +12,6 @@
 #include <iostream>
 #include <sstream>
 #include <string>
-#include <vector>
 
 namespace dictate {
 
@@ -44,8 +43,6 @@ static CGKeyCode key_from_name(const std::string &name) {
   }
   if (name == "space")
     return kVK_Space;
-  if (name == "f5")
-    return kVK_F5;
   return kVK_ANSI_D;
 }
 
@@ -55,10 +52,6 @@ void parse_hotkey(const std::string &spec) {
   std::string part;
   std::string key_part = "d";
   while (std::getline(ss, part, '+')) {
-    part.erase(0, part.find_first_not_of(" \t"));
-    part.erase(part.find_last_not_of(" \t") + 1);
-    if (part.empty())
-      continue;
     if (part == "ctrl" || part == "control")
       g_hk.ctrl = true;
     else if (part == "shift")
@@ -67,7 +60,7 @@ void parse_hotkey(const std::string &spec) {
       g_hk.opt = true;
     else if (part == "cmd" || part == "command")
       g_hk.cmd = true;
-    else
+    else if (!part.empty())
       key_part = part;
   }
   g_hk.key = key_from_name(key_part);
@@ -77,30 +70,16 @@ bool mod_down(CGKeyCode vk) {
   return CGEventSourceKeyState(kCGEventSourceStateHIDSystemState, vk);
 }
 
-bool chord_live() {
-  const bool ctrl = !g_hk.ctrl || mod_down(kVK_Control) || mod_down(kVK_RightControl);
-  const bool shift = !g_hk.shift || mod_down(kVK_Shift) || mod_down(kVK_RightShift);
-  const bool opt = !g_hk.opt || mod_down(kVK_Option) || mod_down(kVK_RightOption);
-  const bool cmd = !g_hk.cmd || mod_down(kVK_Command) || mod_down(kVK_RightCommand);
+bool chord_ok(CGEventFlags f) {
+  const bool ctrl = !g_hk.ctrl || (f & kCGEventFlagMaskControl) ||
+                    mod_down(kVK_Control) || mod_down(kVK_RightControl);
+  const bool shift = !g_hk.shift || (f & kCGEventFlagMaskShift) ||
+                     mod_down(kVK_Shift) || mod_down(kVK_RightShift);
+  const bool opt = !g_hk.opt || (f & kCGEventFlagMaskAlternate) ||
+                   mod_down(kVK_Option) || mod_down(kVK_RightOption);
+  const bool cmd = !g_hk.cmd || (f & kCGEventFlagMaskCommand) ||
+                   mod_down(kVK_Command) || mod_down(kVK_RightCommand);
   return ctrl && shift && opt && cmd;
-}
-
-bool chord_flags(NSEventModifierFlags f) {
-  const bool ctrl = !g_hk.ctrl || (f & NSEventModifierFlagControl);
-  const bool shift = !g_hk.shift || (f & NSEventModifierFlagShift);
-  const bool opt = !g_hk.opt || (f & NSEventModifierFlagOption);
-  const bool cmd = !g_hk.cmd || (f & NSEventModifierFlagCommand);
-  return ctrl && shift && opt && cmd;
-}
-
-bool chord_ok(NSEventModifierFlags f) { return chord_flags(f) || chord_live(); }
-
-bool chord_cg(CGEventFlags f) {
-  const bool ctrl = !g_hk.ctrl || (f & kCGEventFlagMaskControl);
-  const bool shift = !g_hk.shift || (f & kCGEventFlagMaskShift);
-  const bool opt = !g_hk.opt || (f & kCGEventFlagMaskAlternate);
-  const bool cmd = !g_hk.cmd || (f & kCGEventFlagMaskCommand);
-  return (ctrl && shift && opt && cmd) || chord_live();
 }
 
 void on_hotkey(bool down) {
@@ -122,17 +101,6 @@ void on_hotkey(bool down) {
   }
 }
 
-void handle_event(NSEvent *event) {
-  const CGKeyCode code = static_cast<CGKeyCode>(event.keyCode);
-  if (code != g_hk.key)
-    return;
-
-  if (event.type == NSEventTypeKeyDown)
-    on_hotkey(true);
-  else if (event.type == NSEventTypeKeyUp)
-    on_hotkey(false);
-}
-
 CGEventRef tap_cb(CGEventTapProxy, CGEventType type, CGEventRef event, void *) {
   if (type == kCGEventTapDisabledByTimeout ||
       type == kCGEventTapDisabledByUserInput)
@@ -140,11 +108,10 @@ CGEventRef tap_cb(CGEventTapProxy, CGEventType type, CGEventRef event, void *) {
 
   const CGKeyCode code = static_cast<CGKeyCode>(
       CGEventGetIntegerValueField(event, kCGKeyboardEventKeycode));
-
   if (code != g_hk.key)
     return event;
 
-  if (type == kCGEventKeyDown && chord_cg(CGEventGetFlags(event)))
+  if (type == kCGEventKeyDown && chord_ok(CGEventGetFlags(event)))
     on_hotkey(true);
   else if (type == kCGEventKeyUp)
     on_hotkey(false);
@@ -168,42 +135,26 @@ void run_ptt() {
     if (!CGPreflightListenEventAccess())
       CGRequestListenEventAccess();
 
-    [NSApplication sharedApplication];
-
-    const NSEventMask mask =
-        NSEventMaskKeyDown | NSEventMaskKeyUp | NSEventMaskFlagsChanged;
-
-    [NSEvent addGlobalMonitorForEventsMatchingMask:mask
-                                           handler:^(NSEvent *e) {
-                                             handle_event(e);
-                                           }];
-
-    [NSEvent addLocalMonitorForEventsMatchingMask:mask
-                                        handler:^NSEvent *(NSEvent *e) {
-                                          handle_event(e);
-                                          return e;
-                                        }];
-
     const CGEventMask cmask = CGEventMaskBit(kCGEventKeyDown) |
                               CGEventMaskBit(kCGEventKeyUp);
     CFMachPortRef tap = CGEventTapCreate(
         kCGSessionEventTap, kCGHeadInsertEventTap, kCGEventTapOptionListenOnly,
         cmask, tap_cb, nullptr);
-    if (tap) {
-      CFRunLoopSourceRef src =
-          CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0);
-      CFRunLoopAddSource(CFRunLoopGetCurrent(), src, kCFRunLoopCommonModes);
-      CGEventTapEnable(tap, true);
-      CFRelease(src);
+    if (!tap) {
+      std::cerr << "Failed to create event tap.\n";
+      return;
     }
 
-    const char *mode =
-        g_settings.mode == Settings::Mode::Toggle ? "toggle" : "hold";
-    std::cerr << "Ready (" << mode << "): " << g_settings.hotkey << '\n';
+    CFRunLoopSourceRef src =
+        CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0);
+    CFRunLoopAddSource(CFRunLoopGetCurrent(), src, kCFRunLoopCommonModes);
+    CGEventTapEnable(tap, true);
+    CFRelease(src);
+
+    std::cerr << "Ready: " << g_settings.hotkey << '\n';
 
     while (g_running) {
-      [[NSRunLoop currentRunLoop]
-          runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.05]];
+      CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.05, true);
     }
   }
 }

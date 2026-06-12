@@ -1,6 +1,7 @@
 #pragma once
 
 #include <atomic>
+#include <condition_variable>
 #include <mutex>
 #include <vector>
 
@@ -10,8 +11,9 @@ inline std::atomic<bool> g_running{true};
 
 struct Session {
   std::mutex mutex;
+  std::condition_variable cv;
   std::atomic<bool> recording{false};
-  std::atomic<bool> ready{false};
+  bool ready = false;
   std::vector<float> pcm;
 };
 

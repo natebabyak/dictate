@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["mode", "hotkey", "model"],
+  "properties": {
+    "$schema": {
+      "type": "string"
+    },
+    "mode": {
+      "type": "string",
+      "enum": ["hold", "toggle"]
+    },
+    "hotkey": {
+      "type": "string",
+      "minLength": 1
+    },
+    "model": {
+      "type": "string",
+      "enum": ["tiny.en", "base.en", "small.en", "medium.en", "large-v3"]
+    }
+  }
+}

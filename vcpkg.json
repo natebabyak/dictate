@@ -1,6 +1,8 @@
 {
   "dependencies": [
     "miniaudio",
+    "nlohmann-json",
+    "valijson",
     {
       "name": "whisper-cpp",
       "features": ["metal"],

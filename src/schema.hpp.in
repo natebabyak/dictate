@@ -1,0 +1,7 @@
+#pragma once
+
+namespace dictate {
+
+inline constexpr char kConfigSchema[] = R"json(@CONFIG_SCHEMA@)json";
+
+}
